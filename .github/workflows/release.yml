@@ -1,0 +1,91 @@
+name: build-and-release
+
+# Build the per-version wheels (cp38-cp313 x x86_64/aarch64/win_amd64)
+# and attach them to a GitHub Release. Triggered by pushing a version tag:
+#   git tag v1.0.0 && git push origin v1.0.0
+# A manual run (workflow_dispatch) builds the wheels without releasing,
+# so the matrix can be exercised before cutting a tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: wheels ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest      # native x86_64
+            arch: x86_64
+          - runner: ubuntu-24.04-arm   # native aarch64 (free on public repos)
+            arch: aarch64
+          - runner: windows-latest     # x64 (eSPDI_DM.dll is 64-bit only)
+            arch: win_amd64
+    steps:
+      - uses: actions/checkout@v7
+
+      # Config lives in [tool.cibuildwheel] in pyproject.toml.
+      - name: Build wheels (cibuildwheel)
+        run: pipx run cibuildwheel==2.21.3 --output-dir wheelhouse
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.arch }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
+
+  build_examples:
+    name: examples bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Standalone sample-code download for wheel users — no clone, no
+      # build. Versioned from pyproject.toml so it matches the wheels.
+      # docs/api.md is bundled too, so the API reference the examples
+      # README points at resolves inside the offline bundle.
+      - name: Bundle the examples
+        run: |
+          VER=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          zip -r "pyeys3d-${VER}-examples.zip" examples/ docs/api.md LICENSE \
+              -x "*/__pycache__/*"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: examples
+          path: ./*-examples.zip
+
+  release:
+    name: publish GitHub Release
+    needs: [build_wheels, build_sdist, build_examples]
+    runs-on: ubuntu-latest
+    # Only release on an actual tag push, not on manual matrix runs.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create Release with wheels attached
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # Draft so a human reviews the asset list before it goes public.
+          draft: true
+          generate_release_notes: true
