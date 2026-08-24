@@ -1,0 +1,139 @@
+[build-system]
+requires = ["scikit-build-core>=0.6", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyeys3d"
+version = "1.0.0"
+description = "Direct-eSPDI Python wrapper for eYs3D stereo depth cameras"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "eYs3D Microelectronics Corp.", email = "support@eys3d.com" }]
+keywords = ["camera", "depth", "stereo", "eys3d", "g100plus", "r77", "g62"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: Capture :: Digital Camera",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.20",
+    "pyyaml>=5.4",
+]
+
+[project.optional-dependencies]
+# Covers every example except 03_pointcloud_open3d.py — install open3d
+# separately for that one (its aarch64 wheel coverage is incomplete, and a
+# failing extra would block the whole install on Jetson).
+examples = ["opencv-python>=4.5", "pyglet>=2"]
+dev = ["pytest>=7", "ruff>=0.4", "mypy>=1.8"]
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+ninja.version = ">=1.10"
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+
+# Per-version wheel build (cp38-cp313 × x86_64 / aarch64 / win_amd64).
+# pybind11 does not support a usable Stable ABI build below cp312
+# (PyTuple_SET_ITEM / vectorcall macros are not in the limited API), so
+# one wheel ships per Python version. pip selects the matching wheel at
+# install time; users download a single wheel.
+
+[tool.cibuildwheel]
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
+# The bundled libeSPDI is a glibc binary; musl is not supported.
+skip = "*-musllinux*"
+# 64-bit only: libeSPDI ships x86_64 / aarch64 binaries, and cibuildwheel
+# would otherwise also attempt i686 on x86_64 runners.
+archs = ["auto64"]
+build-frontend = "build"
+# libeSPDI is already vendored into pyeys3d/eSPDI/ with the binding's
+# RUNPATH ($ORIGIN/eSPDI) wired up, so the wheel is self-contained.
+# Disable auditwheel repair: it would re-vendor / rename the vendor .so
+# and re-tag the wheel, breaking the RPATH layout. Wheels keep the plain
+# linux_<arch> tag, which installs fine from a Release file (the package
+# is not published to PyPI).
+repair-wheel-command = ""
+
+[tool.cibuildwheel.linux]
+# Build inside manylinux so the *binding* links against an old glibc; the
+# vendor libeSPDI carries its own ABI requirements unchanged. manylinux_2_28
+# (not 2014): libeSPDI needs CXXABI_1.3.11 (GCC >= 7 libstdc++), and the
+# manylinux2014 / CentOS 7 runtime libstdc++ cannot even load it for the
+# in-container import test. glibc 2.28 stays below the Ubuntu 20.04 (2.31)
+# baseline the package supports.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+# Self-contain the wheel: static libstdc++/libgcc plus a vendored libgomp.so.1
+# beside libeSPDI, so it imports on a host without a matching GCC runtime.
+# Ordinary/editable builds leave this off (see CMakeLists.txt) and use the
+# host runtime.
+# Its own build directory, not the one a plain `pip install .` uses:
+# CMake's option() leaves an existing cache entry alone, so sharing
+# build/<wheel tag> between the two would carry this ON into an
+# ordinary build with nothing on the command line saying so.
+config-settings = { "cmake.define.PYEYS3D_SELF_CONTAINED" = "ON", "build-dir" = "build/self-contained/{wheel_tag}" }
+# Smoke-test the freshly built wheel. The import dlopens the binding, which
+# forces the loader to resolve libeSPDI (and its libOpenCL stub) via RUNPATH
+# — the exact chain that must hold on user machines. Reading every model
+# catalog and py.typed then proves the package data survived the build,
+# which is the failure this stage can see and a source checkout cannot.
+# APC_Init / Context() is skipped: the CI container has no /dev/video* to
+# enumerate. The full suite runs against a wheel built this way in ci.yml's
+# wheel-test-minimal; tests/ is not in the release tree.
+test-command = "python -c \"import pyeys3d as ey, pathlib; ms = ey.supported_models(); assert ms, 'no models'; assert all(ey.load_catalog(m) for m in ms), 'mode catalog missing'; p = pathlib.Path(ey.__file__).parent; assert (p / 'py.typed').is_file(), 'py.typed missing'; print(ey.__version__, len(ms), 'models')\""
+
+[tool.cibuildwheel.windows]
+# Same smoke as Linux: resolves eSPDI_DM.dll (and the system OpenCL.dll it
+# imports) through the package's add_dll_directory hook, then checks the
+# package data.
+test-command = "python -c \"import pyeys3d as ey, pathlib; ms = ey.supported_models(); assert ms, 'no models'; assert all(ey.load_catalog(m) for m in ms), 'mode catalog missing'; p = pathlib.Path(ey.__file__).parent; assert (p / 'py.typed').is_file(), 'py.typed missing'; print(ey.__version__, len(ms), 'models')\""
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+extend-exclude = ["eSPDI", "build"]
+
+[tool.ruff.lint]
+# pyflakes (F), pycodestyle (E/W), import order (I), flake8-bugbear (B).
+# pyupgrade is intentionally left off: the package supports Python 3.8, where
+# typing.Union/Optional are the correct runtime forms. The examples double as
+# copy-paste references, so they are held to the same bar as the package.
+select = ["E", "F", "W", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The native module import must follow the Windows DLL-directory setup, so
+# it cannot sit at the top of the file.
+"src/pyeys3d/__init__.py" = ["E402"]
+
+[tool.mypy]
+files = ["src/pyeys3d"]
+ignore_missing_imports = true      # cv2 / pyglet / open3d are optional extras
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# The hand-written native stub is validated against the bindings by
+# tests/test_native_stub.py; its enum members trip a checker-version-specific
+# rule, so don't re-flag it here (declarations stay usable by callers).
+module = "pyeys3d._pyeys3d_native"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Third-party stubs (numpy especially) may use newer typing syntax than the
+# checker parses; type-check our code, not theirs.
+module = ["numpy", "numpy.*", "cv2", "cv2.*", "pyglet", "pyglet.*",
+          "open3d", "open3d.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
